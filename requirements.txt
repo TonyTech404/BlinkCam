@@ -1,0 +1,6 @@
+mediapipe==0.10.35
+opencv-python==5.0.0.93
+pyvirtualcam
+numpy
+pynput
+pyobjc-framework-AVFoundation

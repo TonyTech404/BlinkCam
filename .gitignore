@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# MediaPipe model bundle, fetched by scripts/setup.sh
+models/*.task
+
+# Calibration recordings and patch banks are personal data. Never commit.
+data/
+*.npz
+*.mp4
+*.mov
+.pytest_cache/
