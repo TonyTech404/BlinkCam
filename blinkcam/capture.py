@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -33,13 +34,11 @@ class Device:
 
     @property
     def is_virtual(self) -> bool:
-        """Whether this is a virtual camera rather than real hardware.
+        """Whether this device NAME belongs to a virtual camera.
 
-        Capturing from our own output would feed the effect into itself, and it
-        cannot be detected from the picture: while the effect is off the output
-        is byte-identical to the input, so any content comparison reports a
-        perfect match no matter which device is open. Identity has to come from
-        the device, not the frames.
+        Useful for display only. It must NOT be used to decide what to capture:
+        `index` here is AVFoundation's, and OpenCV opens a different device at
+        the same number. Use virtual_capture_index() for that.
         """
         lowered = self.name.lower()
         return any(word in lowered for word in
@@ -47,11 +46,11 @@ class Device:
 
 
 def list_devices() -> list[Device]:
-    """Video capture devices with their real names, in OpenCV's index order.
+    """Video capture devices with their real names, in AVFoundation's order.
 
-    OpenCV cannot report device names on macOS, and indices are not stable:
-    installing the virtual camera renumbered everything here. AVFoundation is
-    asked directly so a device can be chosen by name.
+    The indices here are AVFoundation's own and do NOT match the ones
+    cv2.VideoCapture opens; see probe_virtual_index. Use this to show the user
+    what is attached, never to choose a capture device.
     """
     try:
         from AVFoundation import AVCaptureDevice
@@ -66,10 +65,15 @@ def list_devices() -> list[Device]:
 
 
 def default_camera_index() -> int:
-    """First real camera, skipping virtual ones."""
-    for device in list_devices():
-        if not device.is_virtual:
-            return device.index
+    """Lowest OpenCV index that is not our own virtual camera output.
+
+    Deliberately NOT "the first device AVFoundation calls non-virtual": those
+    indices do not match the ones OpenCV opens. See probe_virtual_index.
+    """
+    virtual = virtual_capture_index()
+    for index in range(4):
+        if index != virtual:
+            return index
     return 0
 
 
@@ -112,18 +116,18 @@ class Camera:
     # ---- lifecycle -----------------------------------------------------
 
     def start(self) -> "Camera":
-        device = resolve_device(self.config.index)
-        if device is not None:
-            self.name = device.name
-            if device.is_virtual and not self.config.allow_virtual:
-                names = ", ".join(
-                    f"[{d.index}] {d.name}" for d in list_devices())
+        # Refuse to capture our own output. The check is against the MEASURED
+        # OpenCV index, not against AVFoundation's device names: those indices
+        # disagree, and trusting the names is what put a live call into a
+        # feedback loop. See probe_virtual_index.
+        if not self.config.allow_virtual:
+            virtual = virtual_capture_index()
+            if virtual is not None and self.config.index == virtual:
                 raise RuntimeError(
-                    f"Camera {device.index} is '{device.name}', a virtual "
-                    f"camera. Capturing it would feed BlinkCam's own output "
-                    f"back into itself.\nAvailable devices: {names}\n"
-                    f"Pass --camera {default_camera_index()} for the real "
-                    f"webcam.")
+                    f"Capture index {self.config.index} is BlinkCam's own "
+                    f"virtual camera output; capturing it would feed the "
+                    f"effect back into itself.\n"
+                    f"Use --camera {default_camera_index()} instead.")
 
         cap = cv2.VideoCapture(self.config.index, cv2.CAP_AVFOUNDATION)
         if not cap.isOpened():
@@ -296,3 +300,130 @@ def _silenced_stderr():
         os.dup2(saved, 2)
         os.close(devnull)
         os.close(saved)
+
+# ---------------------------------------------------------------------------
+# Which OpenCV index is our own output
+# ---------------------------------------------------------------------------
+
+_VIRTUAL_CACHE = os.path.join(tempfile.gettempdir(), "blinkcam-virtual-index")
+
+
+def _device_fingerprint() -> str:
+    """Identifies the SET of cameras attached, so a cached probe is invalidated
+    when one is plugged in or removed.
+
+    Sorted deliberately. AVFoundation's enumeration order is not stable within
+    a session, so an order-dependent fingerprint misses the cache on almost
+    every call and re-runs a five second probe each time.
+    """
+    return "|".join(sorted(f"{d.name}:{d.uid}" for d in list_devices()))
+
+
+def _marker_frame(width: int, height: int) -> np.ndarray:
+    """A pattern no real scene produces: coarse random colour blocks."""
+    rng = np.random.default_rng(12345)
+    blocks = rng.integers(0, 255, (9, 16, 3), dtype=np.uint8)
+    return cv2.resize(blocks, (width, height), interpolation=cv2.INTER_NEAREST)
+
+
+def _looks_like(frame: np.ndarray, marker: np.ndarray) -> float:
+    a = cv2.resize(frame, (64, 36), interpolation=cv2.INTER_AREA)
+    b = cv2.resize(marker, (64, 36), interpolation=cv2.INTER_AREA)
+    x = a.astype(np.float32).ravel()
+    y = b.astype(np.float32).ravel()
+    if x.std() < 1.0 or y.std() < 1.0:
+        return 0.0
+    return float(np.corrcoef(x, y)[0, 1])
+
+
+def probe_virtual_index(max_index: int = 4, settle: float = 3.5) -> int | None:
+    """Which OpenCV capture index is the virtual camera, measured not guessed.
+
+    OpenCV's AVFoundation indices do NOT correspond to AVFoundation's own
+    enumeration. Measured on macOS 26.4: AVFoundation reported [0] OBS Virtual
+    Camera and [1] UGREEN Camera 4K, while OpenCV's index 1 was the virtual
+    camera and index 0 the webcam. Every AVFoundation enumeration tried
+    (devicesWithMediaType_, devices(), AVCaptureDeviceDiscoverySession) agreed
+    with each other and disagreed with OpenCV, so there is no ordering to copy.
+    AVFoundation's own order also changed within a single session.
+
+    Selecting a device by name therefore cannot work, and getting it wrong is
+    not a small matter: BlinkCam captured its own output and republished it,
+    live, mid-call.
+
+    So measure the correspondence. Publish a marker no real scene produces and
+    find the index that returns it. Correlation was 0.992 for the virtual
+    camera against 0.044 for the webcam, so the test is decisive rather than
+    marginal.
+
+    Returns None if the virtual camera cannot be opened, in which case there is
+    nothing to avoid capturing.
+    """
+    from .output import VirtualCamera, obs_is_running
+
+    if obs_is_running():
+        return None
+
+    marker = _marker_frame(1920, 1080)
+    found: int | None = None
+    stop = threading.Event()
+
+    def keep_publishing(camera) -> None:
+        # The marker must still be going out WHILE we read, or the sink falls
+        # back to OBS's placeholder the moment we stop and the probe finds
+        # nothing. Publishing before reading is not enough.
+        while not stop.is_set():
+            camera.send(marker)
+            camera.sleep_until_next_frame()
+
+    try:
+        with VirtualCamera(1920, 1080, 30) as vcam:
+            pump = threading.Thread(target=keep_publishing, args=(vcam,),
+                                    daemon=True)
+            pump.start()
+            time.sleep(settle)
+
+            with _silenced_stderr():
+                for index in range(max_index):
+                    cap = cv2.VideoCapture(index, cv2.CAP_AVFOUNDATION)
+                    if not cap.isOpened():
+                        cap.release()
+                        continue
+                    ok = False
+                    frame = None
+                    for _ in range(6):
+                        ok, frame = cap.read()
+                    cap.release()
+                    if ok and frame is not None and _looks_like(frame, marker) > 0.9:
+                        found = index
+                        break
+            stop.set()
+            pump.join(timeout=1.0)
+    except Exception:
+        return None
+    return found
+
+
+def virtual_capture_index(refresh: bool = False) -> int | None:
+    """probe_virtual_index, cached against the current set of cameras.
+
+    The probe costs a few seconds and briefly publishes a marker pattern, so it
+    runs only when the camera set has changed since last time.
+    """
+    fingerprint = _device_fingerprint()
+    if not refresh:
+        try:
+            with open(_VIRTUAL_CACHE) as handle:
+                cached_print, cached_index = handle.read().split("\n", 1)
+            if cached_print == fingerprint:
+                return None if cached_index.strip() == "none" else int(cached_index)
+        except (OSError, ValueError):
+            pass
+
+    index = probe_virtual_index()
+    try:
+        with open(_VIRTUAL_CACHE, "w") as handle:
+            handle.write(f"{fingerprint}\n{'none' if index is None else index}")
+    except OSError:
+        pass
+    return index

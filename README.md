@@ -91,6 +91,16 @@ past 70 the effect disables entirely.
 - **Auto-exposure lock is attempted but macOS often ignores it.** This matters
   less than it sounds: two-band relighting re-derives illumination from the
   live frame every frame, so exposure drift is compensated automatically.
+- **Capture device indices are measured, not named.** OpenCV's
+  `cv2.VideoCapture` indices do not correspond to AVFoundation's device
+  enumeration. Measured on macOS 26.4: AVFoundation reported the virtual
+  camera at index 0 and the webcam at 1, while OpenCV opened the webcam at 0
+  and the virtual camera at 1. AVFoundation's own order also changed within a
+  session. Choosing a device by name therefore put a live call into a feedback
+  loop, capturing BlinkCam's own output. On first run after the camera set
+  changes, BlinkCam publishes a marker pattern for a few seconds and finds
+  which index returns it; the answer is cached. Override with `--camera N` if
+  you know better.
 - **MediaPipe is pinned to 0.10.35 and runs on CPU, deliberately.** The GPU
   delegate never releases the pixel buffer behind each input frame and leaks
   about 3.4 MB per frame, which consumed 48 GB of RAM in eight minutes and
