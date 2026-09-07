@@ -37,6 +37,63 @@ PERMISSION_HELP = (
 )
 
 
+def request_trust() -> bool:
+    """Ask macOS for the Accessibility grant, with the system prompt.
+
+    This exists because finding the setting by hand is genuinely hard: an app
+    does not appear in Privacy & Security > Accessibility at all until it has
+    either requested the permission or been added by hand with the + button,
+    and the grant belongs to whichever app launched us rather than to python.
+    Telling a user to go and find "Visual Studio Code" in an empty list is a
+    bad instruction.
+
+    AXIsProcessTrustedWithOptions with the prompt option makes macOS show its
+    own dialog AND add the launching app to the list, so all that is left is
+    flipping a switch. Returns the trust state at the time of the call, which
+    is still False immediately after prompting: the grant only takes effect
+    for a freshly launched process.
+    """
+    import ctypes
+    import ctypes.util
+
+    for name in ("ApplicationServices", "HIServices"):
+        path = ctypes.util.find_library(name)
+        if not path:
+            continue
+        try:
+            lib = ctypes.cdll.LoadLibrary(path)
+            fn = getattr(lib, "AXIsProcessTrustedWithOptions", None)
+            if fn is None:
+                continue
+
+            # Build {kAXTrustedCheckOptionPrompt: kCFBooleanTrue} by hand.
+            cf = ctypes.cdll.LoadLibrary(
+                ctypes.util.find_library("CoreFoundation"))
+            cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+            cf.CFStringCreateWithCString.argtypes = [
+                ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+            cf.CFDictionaryCreate.restype = ctypes.c_void_p
+            cf.CFDictionaryCreate.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+                ctypes.POINTER(ctypes.c_void_p), ctypes.c_long,
+                ctypes.c_void_p, ctypes.c_void_p]
+
+            key = ctypes.c_void_p(cf.CFStringCreateWithCString(
+                None, b"AXTrustedCheckOptionPrompt", 0x08000100))  # kCFStringEncodingUTF8
+            true_ref = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue")
+
+            keys = (ctypes.c_void_p * 1)(key)
+            values = (ctypes.c_void_p * 1)(true_ref)
+            options = cf.CFDictionaryCreate(None, keys, values, 1, None, None)
+
+            fn.restype = ctypes.c_bool
+            fn.argtypes = [ctypes.c_void_p]
+            return bool(fn(ctypes.c_void_p(options)))
+        except Exception:
+            continue
+    return False
+
+
 def process_is_trusted() -> bool:
     """Whether macOS will deliver global key events to this process.
 

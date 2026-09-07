@@ -288,7 +288,15 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"Toggle from anywhere:  kill -USR1 {os.getpid()}")
 
     hotkey = GlobalHotkey(lambda: transition.toggle(), args.hotkey)
-    if hotkey.start():
+    if not hotkey.start() and not args.no_permission_prompt:
+        # Ask macOS to show its own dialog, which also ADDS the launching app
+        # to the Accessibility list. Without this the app is not in that list
+        # at all and the user has to find it with the + button, which is the
+        # step everyone gets stuck on.
+        from .hotkey import request_trust
+        request_trust()
+        hotkey.start()
+    if hotkey.available:
         print(f"Global hotkey: {args.hotkey}")
     else:
         print(PERMISSION_HELP)
@@ -493,6 +501,8 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("run", help="run the filter into the virtual camera")
     common(r)
     r.add_argument("--hotkey", default=DEFAULT_COMBO)
+    r.add_argument("--no-permission-prompt", action="store_true",
+                   help="do not ask macOS for the Accessibility grant")
     r.add_argument("--rise", type=float, default=0.15,
                    help="closure line height as a fraction of the aperture")
     r.add_argument("--debug", action="store_true",
