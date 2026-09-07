@@ -11,13 +11,29 @@ from __future__ import annotations
 import threading
 from typing import Callable
 
-DEFAULT_COMBO = "<cmd>+<shift>+b"
+# Deliberately a triple modifier. cmd+shift+b, the obvious choice, toggles the
+# bookmarks bar in Chrome and runs the build task in VS Code, so it fires those
+# as well as us. Nothing standard binds ctrl+alt+cmd.
+DEFAULT_COMBO = "<ctrl>+<alt>+<cmd>+b"
 
 PERMISSION_HELP = (
     "Global hotkey unavailable: this process is not trusted for input\n"
-    "monitoring. Grant your terminal Accessibility and Input Monitoring in\n"
-    "System Settings > Privacy & Security, then restart the terminal.\n"
-    "Until then, focus the preview window and press 'b' to toggle."
+    "monitoring.\n"
+    "\n"
+    "The grant belongs to the app that LAUNCHED this process, not to python\n"
+    "and not to the terminal in general. If you started BlinkCam from the\n"
+    "VS Code terminal, grant Visual Studio Code; from Terminal.app, grant\n"
+    "Terminal. Add it under BOTH of these, then QUIT AND REOPEN that app:\n"
+    "\n"
+    "  System Settings > Privacy & Security > Accessibility\n"
+    "  System Settings > Privacy & Security > Input Monitoring\n"
+    "\n"
+    "Accessibility alone is not enough, and the grant only applies to a\n"
+    "freshly launched process, so reopening the app is required.\n"
+    "\n"
+    "Two alternatives that need no permission at all:\n"
+    "  - click the preview window; focus moves but your video keeps sending\n"
+    "  - send the process a signal from any shell:  kill -USR1 <pid>"
 )
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
 import time
 from collections import deque
@@ -277,6 +278,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.start_on:
         # Skip the arming wait: there is nothing to hide on a cold start.
         transition.state = TransitionState.ON
+
+    # SIGUSR1 toggles too. The global hotkey needs an Accessibility grant that
+    # belongs to whichever app launched us and cannot be requested from here,
+    # and the obvious key combinations are already taken by browsers. A signal
+    # needs no permission, collides with nothing, and can be sent from a shell,
+    # a script, a Stream Deck or a Shortcut.
+    signal.signal(signal.SIGUSR1, lambda *_: transition.toggle())
+    print(f"Toggle from anywhere:  kill -USR1 {os.getpid()}")
 
     hotkey = GlobalHotkey(lambda: transition.toggle(), args.hotkey)
     if hotkey.start():

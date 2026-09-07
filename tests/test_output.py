@@ -181,3 +181,33 @@ def test_landmarker_generates_its_own_clock_when_none_is_given():
     assert seen == sorted(seen)
     assert len(set(seen)) == len(seen)
     assert all(v >= 0 for v in seen)
+
+
+# ---- hotkey configuration --------------------------------------------------
+
+
+def test_default_hotkey_avoids_browser_and_editor_collisions():
+    """cmd+shift+b toggles the bookmarks bar in Chrome and runs the build task
+    in VS Code, so it fires those as well as us. The default has to be a
+    combination nothing standard claims."""
+    from blinkcam.hotkey import DEFAULT_COMBO
+
+    taken = {"<cmd>+<shift>+b", "<cmd>+<alt>+b", "<cmd>+b",
+             "<cmd>+<shift>+n", "<cmd>+<shift>+t", "<cmd>+<shift>+d"}
+    assert DEFAULT_COMBO not in taken
+    # Three modifiers is what keeps it clear of single-app bindings.
+    assert DEFAULT_COMBO.count("+") >= 3
+
+
+def test_permission_help_names_the_launching_app_not_the_terminal():
+    """The Accessibility grant belongs to whichever app spawned the process, so
+    telling the user to 'grant your terminal' sends them to the wrong pane when
+    they launched from an editor."""
+    from blinkcam.hotkey import PERMISSION_HELP
+
+    assert "Input Monitoring" in PERMISSION_HELP
+    assert "Accessibility" in PERMISSION_HELP
+    assert "LAUNCHED" in PERMISSION_HELP
+    # And it must offer the permission-free routes.
+    assert "USR1" in PERMISSION_HELP
+    assert "preview" in PERMISSION_HELP

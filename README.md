@@ -108,6 +108,14 @@ past 70 the effect disables entirely.
   unless we ship our own camera extension.
 - **Teams desktop** sometimes does not list virtual cameras. Use Teams in
   Chrome if so.
+- **Three ways to toggle**, in order of how much setup they need. Click the
+  preview window: focus moves but your video keeps sending, so this is safe
+  mid-call. Send a signal: `kill -USR1 <pid>`, and the app prints its own pid
+  at startup, so this works from any shell, script or Stream Deck with no
+  permission. Or the global hotkey `ctrl+alt+cmd+b`, which needs an
+  Accessibility and Input Monitoring grant for the app that LAUNCHED BlinkCam,
+  not for python and not for the terminal generally, followed by quitting and
+  reopening that app.
 - **Frames take two to three seconds to start flowing** after launch. Start
   BlinkCam, wait for it, then join the call.
 - **Restarting BlinkCam waits about five seconds.** After a client
