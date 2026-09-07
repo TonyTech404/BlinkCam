@@ -123,6 +123,11 @@ FILTER_PRESETS = {
     "pose": dict(mincutoff=0.8, beta=0.008),
     "lid": dict(mincutoff=1.5, beta=0.05),
     "iris": dict(mincutoff=2.0, beta=0.10),
+    # For geometry held in PATCH space, which patch_transform has already
+    # normalised for head pose, scale and roll. The aperture is nearly static
+    # there, so beta is zero: there is no fast motion to keep up with, and the
+    # adaptive term would only re-admit the noise we are trying to remove.
+    "aperture": dict(mincutoff=0.7, beta=0.0),
 }
 
 
@@ -336,6 +341,18 @@ class StabilizedFace:
 
         # Rigid part: where the face is. Heavy smoothing.
         rigid = similarity_transform(self._reference, pts[self.ANCHORS])
+
+        # The reference is whatever the first frame happened to be, and the
+        # residuals are only ever expressed in that frame, so ordinary drift is
+        # harmless: measured over a live session the similarity scale stayed
+        # within 0.89 to 1.02. Re-anchor only if it becomes degenerate, which
+        # would make the inverse transform below meaningless. A one-frame jump
+        # is much better than warping the composite with a bad transform.
+        scale = float(np.hypot(rigid[0, 0], rigid[1, 0]))
+        if not np.isfinite(scale) or not 0.2 < scale < 5.0:
+            self.reset()
+            self._reference = pts[self.ANCHORS].copy()
+            rigid = similarity_transform(self._reference, pts[self.ANCHORS])
         rigid_s = self._rigid(rigid.reshape(-1), timestamp).reshape(2, 3)
 
         # Residual part: how the face is deformed, in the face-local frame.
@@ -360,3 +377,81 @@ class StabilizedFace:
             blendshapes=face.blendshapes,
             landmarks=smoothed,
         )
+
+class ApertureTracker:
+    """Per-eye open-aperture geometry, held in patch space across blinks.
+
+    One cause, two measured symptoms. The mask polygon was derived from the
+    live lid contours every frame, so on this webcam at 20fps it moved:
+
+        still                0.067 px/frame
+        very fast head motion 0.800 px/frame   (12x worse)
+        during a blink        1.883 px/frame   (11x worse)
+
+    Blinks are the worst case because the real aperture collapses while the
+    effect still needs to repaint the whole open region. Motion is bad because
+    landmark noise is amplified by head movement.
+
+    Patch space is already normalised for head pose, scale and roll, so
+    geometry held here follows the head without inheriting its noise. Two gates
+    do the work: updates are smoothed, so per-frame jitter cannot deform the
+    repainted region, and they are suspended while the eye is closing, so a
+    blink cannot either. A squint or a smile reshapes the aperture over several
+    hundred milliseconds and passes the filter; a 100ms blink does not.
+
+    This replaces freezing the whole FaceFrame during a blink, which also froze
+    head pose and made the composite stick and then snap if the head moved.
+    """
+
+    # Below this the lids are open enough to trust as a sample of the resting
+    # aperture. Deliberately well under BLINK_ENTER (0.55) so the approach to a
+    # closure is excluded too, not merely the fully closed phase: most of the
+    # jitter happens while the lid is on its way down.
+    OPEN_BELOW = 0.25
+
+    def __init__(self, freq: float = 30.0) -> None:
+        self.freq = freq
+        self._filters: dict[str, OneEuroFilter] = {}
+        self._held: dict[str, np.ndarray] = {}
+
+    def reset(self) -> None:
+        self._filters.clear()
+        self._held.clear()
+
+    def _track(self, key: str, live: np.ndarray, blink: float,
+               timestamp: float) -> np.ndarray:
+        held = self._held.get(key)
+        if held is not None and held.shape != live.shape:
+            held = None  # landmark count changed; start over
+
+        filt = self._filters.get(key)
+        if filt is None or held is None:
+            filt = OneEuroFilter(self.freq, **FILTER_PRESETS["aperture"])
+            self._filters[key] = filt
+
+        # While the eye is closing, feed the filter its own held value rather
+        # than skipping the update. That keeps its internal clock current, so
+        # the blink does not look like a long pause followed by a jump.
+        sample = held if (held is not None and blink >= self.OPEN_BELOW) else live
+        out = filt(np.asarray(sample, np.float32).reshape(-1),
+                   timestamp).reshape(live.shape).astype(np.float32)
+        self._held[key] = out
+        return out
+
+    def polygon(self, eye: EyeGeometry, m: np.ndarray, blink: float,
+                timestamp: float, rise: float, expand: float) -> np.ndarray:
+        """Mask polygon in patch coordinates, stable through blinks."""
+        live = to_patch_coords(lid_mask_polygon(eye, rise, expand), m)
+        return self._track(f"poly:{eye.side}", live, blink, timestamp)
+
+    def iris(self, eye: EyeGeometry, m: np.ndarray, blink: float,
+             timestamp: float) -> tuple[np.ndarray, float]:
+        """Iris centre in patch coordinates plus its radius.
+
+        Held for the same reason: the iris landmarks are meaningless once the
+        lids cover them, and the globe bulge is driven from the iris position.
+        """
+        live = to_patch_coords(eye.iris_center.reshape(1, 2), m)
+        centre = self._track(f"iris:{eye.side}", live, blink, timestamp)[0]
+        radius = eye.iris_radius * (PATCH_W / max(eye.width * 1.8, 1e-3))
+        return centre, max(float(radius), 2.0)

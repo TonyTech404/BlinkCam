@@ -10,14 +10,15 @@ exposure drift a non-problem rather than a tuning nightmare.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
 
 from .bank import Descriptor, PatchBank, annulus_mask
-from .geometry import (PATCH_H, PATCH_W, closure_line, extract_patch,
-                       feathered_mask, lid_mask_polygon, patch_transform,
+from .geometry import (PATCH_H, PATCH_W, ApertureTracker, closure_line,
+                       extract_patch, feathered_mask, patch_transform,
                        to_patch_coords)
 from .landmarks import EyeGeometry, FaceFrame
 
@@ -135,8 +136,9 @@ def two_band_relight(reference: np.ndarray, live: np.ndarray,
     return target_low + ref_high * contrast
 
 
-def globe_bulge(eye: EyeGeometry, config: RenderConfig,
-                m: np.ndarray) -> np.ndarray:
+def globe_bulge(eye: EyeGeometry, config: RenderConfig, m: np.ndarray,
+                centre: np.ndarray | None = None,
+                radius: float | None = None) -> np.ndarray:
     """Subtle convex shading for the eyeball under the closed lid.
 
     The lid is a thin membrane draped over a sphere, and that sphere still
@@ -146,8 +148,10 @@ def globe_bulge(eye: EyeGeometry, config: RenderConfig,
     fraction of globe motion, and biased upward for Bell's phenomenon, which
     rotates the globe up and out on closure in about 75% of people.
     """
-    centre = to_patch_coords(eye.iris_center.reshape(1, 2), m)[0]
-    radius = max(eye.iris_radius * (PATCH_W / max(eye.width * 1.8, 1e-3)), 2.0)
+    if centre is None:
+        centre = to_patch_coords(eye.iris_center.reshape(1, 2), m)[0]
+    if radius is None:
+        radius = max(eye.iris_radius * (PATCH_W / max(eye.width * 1.8, 1e-3)), 2.0)
 
     cx = float(centre[0])
     cy = float(centre[1]) - config.bell_bias * radius
@@ -169,6 +173,10 @@ class EyeRenderer:
         self._last_choice: dict[str, tuple[int, ...]] = {}
         self._confidence: dict[str, float] = {"right": 0.0, "left": 0.0}
         self._distance: dict[str, float] = {"right": 0.0, "left": 0.0}
+        # Holds the open-aperture geometry in patch space so a blink or a fast
+        # head turn cannot deform the region we repaint. See ApertureTracker.
+        self.aperture = ApertureTracker()
+        self._sticky: dict[str, set[int]] = {}
 
     def confidence(self, side: str) -> float:
         return self._confidence.get(side, 0.0)
@@ -179,13 +187,20 @@ class EyeRenderer:
         return self._distance.get(side, 0.0)
 
     def render(self, frame: np.ndarray, face: FaceFrame,
-               opacity: float = 1.0) -> np.ndarray:
-        """Composite closed eyes onto a copy of the frame."""
+               opacity: float = 1.0,
+               timestamp: float | None = None) -> np.ndarray:
+        """Composite closed eyes onto a copy of the frame.
+
+        timestamp drives the aperture filtering; it defaults to the wall clock
+        so callers that do not track time still get stable geometry.
+        """
+        if timestamp is None:
+            timestamp = time.monotonic()
         if opacity <= 0.0 or len(self.bank) == 0:
             return frame
         out = frame.copy()
         for eye in face.eyes():
-            self._render_eye(out, frame, face, eye, opacity)
+            self._render_eye(out, frame, face, eye, opacity, timestamp)
         return out
 
     def _pose_gate(self, face: FaceFrame, eye: EyeGeometry) -> float:
@@ -210,7 +225,8 @@ class EyeRenderer:
         return float(1.0 - (a - 30.0) / 25.0)
 
     def _render_eye(self, out: np.ndarray, source: np.ndarray, face: FaceFrame,
-                    eye: EyeGeometry, opacity: float) -> None:
+                    eye: EyeGeometry, opacity: float,
+                    timestamp: float) -> None:
         cfg = self.config
         gate = self._pose_gate(face, eye)
         if gate <= 0.0:
@@ -221,7 +237,9 @@ class EyeRenderer:
         live = extract_patch(source, eye).astype(np.float32)
 
         candidates = self.bank.query(
-            Descriptor.build(face, eye), live.astype(np.uint8), k=cfg.top_k)
+            Descriptor.build(face, eye), live.astype(np.uint8), k=cfg.top_k,
+            sticky=self._sticky.get(eye.side))
+        self._sticky[eye.side] = set(self.bank.last_indices)
         if not candidates:
             self._confidence[eye.side] = 0.0
             return
@@ -249,12 +267,16 @@ class EyeRenderer:
 
         rendered = two_band_relight(reference, live, cfg.low_band_sigma)
 
-        bulge = globe_bulge(eye, cfg, m)
+        iris_centre, iris_radius = self.aperture.iris(
+            eye, m, face.blink, timestamp)
+        bulge = globe_bulge(eye, cfg, m, iris_centre, iris_radius)
         rendered += (bulge * (cfg.bulge_strength * 255.0))[..., None]
         rendered = np.clip(rendered, 0, 255)
 
-        polygon = to_patch_coords(
-            lid_mask_polygon(eye, cfg.rise, cfg.mask_expand), m)
+        # Held in patch space, so it neither collapses during a blink nor
+        # inherits landmark noise amplified by head motion.
+        polygon = self.aperture.polygon(
+            eye, m, face.blink, timestamp, cfg.rise, cfg.mask_expand)
         mask = feathered_mask((PATCH_H, PATCH_W), polygon, cfg.feather)
         mask *= alpha
 

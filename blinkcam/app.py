@@ -333,7 +333,6 @@ def cmd_run(args: argparse.Namespace) -> int:
                     cv2.setMouseCallback(window, _on_mouse)
 
                 start = time.monotonic()
-                last_face = None
                 last_report = 0.0
                 harvested = 0
 
@@ -352,13 +351,11 @@ def cmd_run(args: argparse.Namespace) -> int:
 
                     if face is not None:
                         face = stabilizer(face, now)
-                        # Holding the last good geometry through a genuine blink
-                        # keeps the composite from jumping when the user's real
-                        # lids close over our synthetic ones.
-                        if transition.should_freeze_geometry() and last_face:
-                            face = last_face
-                        else:
-                            last_face = face
+                        # Blink handling lives in EyeRenderer.aperture now.
+                        # Freezing the whole FaceFrame here also froze head
+                        # pose, so the composite stuck and then snapped if the
+                        # head moved during a blink. ApertureTracker holds only
+                        # the blink-sensitive geometry and lets pose track live.
                     else:
                         stabilizer.reset()
 
@@ -379,7 +376,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
                     t0 = time.perf_counter()
                     if face is not None and opacity > 0.0:
-                        out = renderer.render(frame, face, opacity)
+                        out = renderer.render(frame, face, opacity, now)
                     else:
                         out = frame
                     stats.add("render", (time.perf_counter() - t0) * 1000)

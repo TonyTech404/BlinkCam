@@ -345,3 +345,55 @@ def test_confidence_rises_fast_and_falls_slow():
         value += (1.0 - value) * cfg.confidence_attack
         frames += 1
     assert frames <= 5
+
+
+# ---- selection stickiness --------------------------------------------------
+
+
+def test_sticky_indices_are_reported_for_the_caller():
+    bank = PatchBank()
+    for i in range(6):
+        bank.add(synthetic_patch(seed=i), descriptor(yaw=i * 8.0), "right",
+                 include_mirror=False)
+    bank.query(descriptor(yaw=10.0), synthetic_patch(), k=3)
+    assert len(bank.last_indices) == 3
+    assert all(0 <= i < len(bank) for i in bank.last_indices)
+
+
+def test_stickiness_breaks_ties_toward_the_previous_choice():
+    """Measured churn was 11% of frames with weights moving only 0.005, so this
+    is a refinement, not the fix for visible instability. It still costs
+    nothing to stop the set flickering between near-identical candidates."""
+    bank = PatchBank()
+    # Two candidates at nearly the same distance from the query.
+    bank.add(synthetic_patch(seed=1), descriptor(yaw=9.9), "right",
+             include_mirror=False)
+    bank.add(synthetic_patch(seed=2), descriptor(yaw=10.1), "right",
+             include_mirror=False)
+    live = synthetic_patch(seed=3)
+
+    plain = bank.query(descriptor(yaw=10.0), live, k=1)[0][0]
+    other_index = next(i for i, p in enumerate(bank.patches) if p is not plain)
+    stuck = bank.query(descriptor(yaw=10.0), live, k=1,
+                       sticky={other_index}, stickiness=1.0)[0][0]
+    assert stuck is not plain, "a large stickiness discount should flip a tie"
+
+
+def test_stickiness_cannot_override_a_clearly_better_match():
+    bank = PatchBank()
+    bank.add(synthetic_patch(seed=1), descriptor(yaw=0.0), "right",
+             include_mirror=False)
+    bank.add(synthetic_patch(seed=2), descriptor(yaw=80.0), "right",
+             include_mirror=False)
+    live = synthetic_patch(seed=3)
+    best = bank.query(descriptor(yaw=0.0), live, k=1,
+                      sticky={1}, stickiness=0.10)[0][0]
+    assert best.descriptor.yaw == pytest.approx(0.0)
+
+
+def test_out_of_range_sticky_indices_are_ignored():
+    """A bank reloaded between frames could leave stale indices behind."""
+    bank = PatchBank()
+    bank.add(synthetic_patch(), descriptor(), "right", include_mirror=False)
+    result = bank.query(descriptor(), synthetic_patch(), k=1, sticky={99, 1000})
+    assert len(result) == 1
