@@ -115,7 +115,12 @@ past 70 the effect disables entirely.
   permission. Or the global hotkey `ctrl+alt+cmd+b`, which needs an
   Accessibility and Input Monitoring grant for the app that LAUNCHED BlinkCam,
   not for python and not for the terminal generally, followed by quitting and
-  reopening that app.
+  reopening that app. Note that an app will not appear in those Settings lists
+  until you add it with the + button.
+- **For a system-wide key with no permissions at all**, bind
+  `scripts/blink-toggle.sh` to a macOS Shortcut and give the Shortcut a
+  keyboard shortcut. The Shortcuts app already holds the right to capture keys,
+  so BlinkCam needs no grant of its own. This is the route to prefer.
 - **Frames take two to three seconds to start flowing** after launch. Start
   BlinkCam, wait for it, then join the call.
 - **Restarting BlinkCam waits about five seconds.** After a client
