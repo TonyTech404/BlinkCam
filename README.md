@@ -16,6 +16,20 @@ scripts/setup.sh
 .venv/bin/python -m blinkcam.app doctor
 ```
 
+## Everyday use
+
+```bash
+scripts/start.sh      # start it, effect on
+scripts/blink-toggle.sh   # toggle the effect
+```
+
+Worth aliasing to `blinkcam` and `blink` in your shell. The launcher refuses to
+start a second instance, refuses to run while OBS holds the camera, and points
+you at calibration if there is no patch bank, because all three of those fail
+confusingly rather than clearly.
+
+## Setup
+
 `setup.sh` installs Python 3.13, the dependencies, the face landmark model and
 OBS. One step needs a human click: launch OBS once and press Start Virtual
 Camera, allowing the extension if macOS asks. Then press Stop Virtual Camera
